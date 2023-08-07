@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sort"
 	"syscall"
 	"time"
 
@@ -40,14 +41,13 @@ func main() {
 		return
 	}
 
-	dg.AddHandler(messageCreate)
 	dg.Identify.Intents = discordgo.IntentsGuildMessages
 	err = dg.Open()
 	if err != nil {
 		fmt.Println(err)
 	}
 
-	go runEvery(time.Second*30, periodicTask, dg)
+	go runEvery(time.Second*15, periodicTask, dg)
 
 	fmt.Println("Bot is now running.  Press CTRL-C to exit.")
 	sc := make(chan os.Signal, 1)
@@ -55,20 +55,6 @@ func main() {
 	<-sc
 
 	dg.Close()
-}
-
-func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
-	if m.Author.ID == s.State.User.ID {
-		return
-	}
-
-	if m.Content == "ping" {
-		s.ChannelMessageSend(m.ChannelID, "Pong!")
-	}
-
-	if m.Content == "pong" {
-		s.ChannelMessageSend(m.ChannelID, "Ping!")
-	}
 }
 
 func runEvery(d time.Duration, f func(*discordgo.Session), s *discordgo.Session) {
@@ -79,20 +65,63 @@ func runEvery(d time.Duration, f func(*discordgo.Session), s *discordgo.Session)
 
 func periodicTask(s *discordgo.Session) {
 	fmt.Println("Task is running...")
-	s.ChannelMessageSend(ChannelID, getMostRecentCommits())
+	latestCommit := getMostRecentCommits()
+	if isMoreThan24HoursAgo(latestCommit.Commit.Author.Date.Time) {
+		s.ChannelMessageSend(ChannelID, "@everyone コード書けよ!!")
+	}
 }
 
-func getMostRecentCommits() string {
+func getMostRecentCommits() *github.RepositoryCommit {
 	ctx := context.Background()
 	ts := oauth2.StaticTokenSource(
 		&oauth2.Token{AccessToken: GithubToken},
 	)
 	tc := oauth2.NewClient(ctx, ts)
 	client := github.NewClient(tc)
-	user, _, err := client.Users.Get(context.Background(), "")
+
+	user, _, err := client.Users.Get(ctx, "")
 	if err != nil {
 		log.Fatalf("Error fetching user: %v", err)
 	}
+	username := *user.Login
 
-	return fmt.Sprintf("Hello, %s\n", *user.Name)
+	opt := &github.RepositoryListOptions{
+		Affiliation: "owner",
+		ListOptions: github.ListOptions{PerPage: 100},
+	}
+
+	repos, _, err := client.Repositories.List(ctx, username, opt)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	sort.Slice(repos, func(i, j int) bool {
+		return repos[i].GetPushedAt().Time.After(repos[j].GetPushedAt().Time)
+	})
+
+	if len(repos) == 0 {
+		log.Fatalf("No repositories found for user: %v", username)
+	}
+	latestRepo := repos[0]
+
+	commits, _, err := client.Repositories.ListCommits(ctx, username, *latestRepo.Name, &github.CommitsListOptions{
+		ListOptions: github.ListOptions{
+			PerPage: 1,
+		},
+	})
+	if err != nil {
+		log.Fatalf("Error fetching commits: %v", err)
+	}
+
+	if len(commits) == 0 {
+		log.Fatalf("No commits found for repository: %v", *latestRepo.Name)
+	}
+
+	latestCommit := commits[0]
+	return latestCommit
+}
+
+func isMoreThan24HoursAgo(t time.Time) bool {
+	duration := time.Since(t)
+	return duration.Hours() >= 24
 }
